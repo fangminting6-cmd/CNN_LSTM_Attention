@@ -1,0 +1,5 @@
+{
+  "acl_threshold": 2.4975738525390625,
+  "unit": "\u4e0e\u8bad\u7ec3\u6570\u636e\u76f8\u540c\u5355\u4f4d",
+  "rule": "predicted_value >= acl_threshold \u2192 High Load"
+}

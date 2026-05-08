@@ -1,0 +1,11 @@
+streamlit
+joblib
+numpy
+pandas
+matplotlib
+scikit-learn
+shap
+imbalanced-learn
+torch
+altair
+openpyxl
