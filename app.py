@@ -5,8 +5,6 @@ import joblib
 import json
 import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.patches import FancyArrowPatch
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -31,7 +29,7 @@ matplotlib.rcParams.update({
 })
 
 # ─────────────────────────────────────────────
-# 1. CSS — 沿用 XGB 页面风格，深蓝学术色调
+# 1. CSS
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -63,6 +61,7 @@ p.sci-subtitle {
     border-radius: 6px;
     padding: 22px 24px 18px;
     margin-top: 12px;
+    margin-bottom: 20px;
 }
 .label-text {
     font-family: 'Times New Roman', serif;
@@ -80,22 +79,28 @@ p.sci-subtitle {
 }
 .result-row { display: flex; align-items: center; margin-top: 4px; }
 .meta-text { color: #7F8C8D; font-size: 0.82rem; margin-top: 8px; font-family: 'Times New Roman', serif; }
-.timeshap-note {
+.shap-label {
+    font-family: 'EB Garamond', serif;
+    font-size: 1.05rem; font-weight: 600; color: #1A3A5C;
+    margin-top: 18px; margin-bottom: 4px;
+}
+.shap-desc {
     background: #EBF5FB; border-left: 4px solid #2E86C1;
-    padding: 10px 14px; border-radius: 4px;
-    font-size: 0.83rem; color: #1A3A5C;
-    font-family: 'Times New Roman', serif; margin-bottom: 12px;
+    padding: 8px 12px; border-radius: 4px;
+    font-size: 0.81rem; color: #1A3A5C;
+    font-family: 'Times New Roman', serif; margin-bottom: 10px;
 }
-.stTabs [data-baseweb="tab"] {
-    font-family: 'Times New Roman', serif !important;
-    font-size: 0.92rem !important;
+.upload-box {
+    background: #F8FAFB; border: 1.5px dashed #AEC6CF;
+    border-radius: 8px; padding: 18px 22px;
+    margin-bottom: 14px; font-family: 'Times New Roman', serif;
+    font-size: 0.88rem; color: #2E4053;
 }
-div[data-testid="stNumberInput"] { margin-bottom: -6px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# 2. Model definition (must match notebook)
+# 2. Model definition
 # ─────────────────────────────────────────────
 class AttentionLayer(nn.Module):
     def __init__(self, hidden_size):
@@ -117,7 +122,6 @@ class CNNLSTMAttentionModel(nn.Module):
         self.sequence_length = input_shape[0]
         self.input_features  = input_shape[1]
         self.hidden_size     = hidden_size
-
         self.conv1d = nn.Conv1d(self.input_features, cnn_channels,
                                 kernel_size=3, padding=1)
         self.bn1    = nn.BatchNorm1d(cnn_channels)
@@ -149,8 +153,7 @@ def load_assets():
     threshold = json.load(open("acl_threshold.json"))["acl_threshold"]
     scaler_X  = joblib.load("scaler_X.pkl")
     scaler_y  = joblib.load("scaler_y_acl.pkl")
-
-    model = CNNLSTMAttentionModel(
+    m = CNNLSTMAttentionModel(
         input_shape  = tuple(cfg["input_shape"]),
         output_dim   = cfg["output_dim"],
         cnn_channels = cfg["cnn_channels"],
@@ -158,120 +161,81 @@ def load_assets():
         lstm_layers  = cfg["lstm_layers"],
         dropout_rate = cfg["dropout_rate"],
     )
-    model.load_state_dict(torch.load("best_model_acl.pt", map_location="cpu"))
-    model.eval()
-    return model, scaler_X, scaler_y, threshold, cfg
+    m.load_state_dict(torch.load("best_model_acl.pt", map_location="cpu"))
+    m.eval()
+    return m, scaler_X, scaler_y, threshold, cfg
 
 try:
     model, scaler_X, scaler_y, ACL_THRESHOLD, cfg = load_assets()
-    FEATURE_COLS = cfg["feature_cols"]       # 9 features
-    TIME_AXIS    = np.array(cfg["time_axis_ms"])   # 21 points, 0-100 ms
+    FEATURE_COLS = cfg["feature_cols"]
+    TIME_AXIS    = np.array(cfg["time_axis_ms"])
     assets_ok    = True
 except Exception as e:
-    st.error(f"资源加载失败: {e}")
+    st.error(f"Asset loading failed: {e}")
     assets_ok = False
 
 
 # ─────────────────────────────────────────────
 # 4. Prediction + TimeSHAP helpers
 # ─────────────────────────────────────────────
-def predict_single(X_seq: np.ndarray):
-    """X_seq: [21, 9] raw (unscaled)"""
-    X_flat   = X_seq.reshape(-1, 9)
-    X_scaled = scaler_X.transform(X_flat).reshape(1, 21, 9)
-    tensor   = torch.tensor(X_scaled, dtype=torch.float32)
+def predict_single(X_seq):
+    X_sc = scaler_X.transform(X_seq.reshape(-1, 9)).reshape(1, 21, 9)
+    t    = torch.tensor(X_sc, dtype=torch.float32)
     with torch.no_grad():
-        pred, attn_w = model(tensor)
-    pred_inv  = scaler_y.inverse_transform(pred.numpy())[0, 0]
-    attn_np   = attn_w.squeeze().numpy()          # [21]
-    return pred_inv, attn_np
+        pred, attn_w = model(t)
+    return scaler_y.inverse_transform(pred.numpy())[0, 0], attn_w.squeeze().numpy()
 
 
-def compute_timeshap_event(X_seq: np.ndarray, n_samples: int = 200):
-    """
-    Event-level TimeSHAP via perturbation (replacing each time-step with
-    its feature-wise mean across all time-steps).
-    Returns shap_event [21]
-    """
-    X_flat   = X_seq.reshape(-1, 9)
-    X_scaled = scaler_X.transform(X_flat).reshape(21, 9)
-    baseline = X_scaled.mean(axis=0)          # [9]
+def _fwd(X_sc):
+    t = torch.tensor(X_sc[np.newaxis], dtype=torch.float32)
+    with torch.no_grad():
+        out, _ = model(t)
+    return scaler_y.inverse_transform(out.numpy())[0, 0]
 
-    def _fwd(x_3d):
-        t = torch.tensor(x_3d, dtype=torch.float32)
-        with torch.no_grad():
-            out, _ = model(t)
-        return scaler_y.inverse_transform(out.numpy())[0, 0]
 
-    full_pred = _fwd(X_scaled[np.newaxis])
-    shap_event = np.zeros(21)
+def compute_timeshap_event(X_seq):
+    X_sc = scaler_X.transform(X_seq.reshape(-1, 9)).reshape(21, 9)
+    base = X_sc.mean(axis=0)
+    full = _fwd(X_sc)
+    shap = np.zeros(21)
     for t in range(21):
-        x_masked = X_scaled.copy()
-        x_masked[t] = baseline
-        masked_pred = _fwd(x_masked[np.newaxis])
-        shap_event[t] = full_pred - masked_pred
-    return shap_event
+        xm = X_sc.copy(); xm[t] = base
+        shap[t] = full - _fwd(xm)
+    return shap
 
 
-def compute_timeshap_feature(X_seq: np.ndarray):
-    """
-    Feature-level TimeSHAP: marginalise over time.
-    Returns shap_feature [9]
-    """
-    X_flat   = X_seq.reshape(-1, 9)
-    X_scaled = scaler_X.transform(X_flat).reshape(21, 9)
-    baseline = X_scaled.mean(axis=0)
-
-    def _fwd(x_3d):
-        t = torch.tensor(x_3d, dtype=torch.float32)
-        with torch.no_grad():
-            out, _ = model(t)
-        return scaler_y.inverse_transform(out.numpy())[0, 0]
-
-    full_pred = _fwd(X_scaled[np.newaxis])
-    shap_feat = np.zeros(9)
+def compute_timeshap_feature(X_seq):
+    X_sc = scaler_X.transform(X_seq.reshape(-1, 9)).reshape(21, 9)
+    base = X_sc.mean(axis=0)
+    full = _fwd(X_sc)
+    shap = np.zeros(9)
     for f in range(9):
-        x_masked = X_scaled.copy()
-        x_masked[:, f] = baseline[f]
-        shap_feat[f] = full_pred - _fwd(x_masked[np.newaxis])
-    return shap_feat
+        xm = X_sc.copy(); xm[:, f] = base[f]
+        shap[f] = full - _fwd(xm)
+    return shap
 
 
-def compute_timeshap_cell(X_seq: np.ndarray):
-    """
-    Cell-level TimeSHAP: [21 x 9] joint perturbation.
-    Returns shap_cell [21, 9]
-    """
-    X_flat   = X_seq.reshape(-1, 9)
-    X_scaled = scaler_X.transform(X_flat).reshape(21, 9)
-    baseline = X_scaled.mean(axis=0)
-
-    def _fwd(x_3d):
-        t = torch.tensor(x_3d, dtype=torch.float32)
-        with torch.no_grad():
-            out, _ = model(t)
-        return scaler_y.inverse_transform(out.numpy())[0, 0]
-
-    full_pred = _fwd(X_scaled[np.newaxis])
-    shap_cell = np.zeros((21, 9))
+def compute_timeshap_cell(X_seq):
+    X_sc = scaler_X.transform(X_seq.reshape(-1, 9)).reshape(21, 9)
+    base = X_sc.mean(axis=0)
+    full = _fwd(X_sc)
+    shap = np.zeros((21, 9))
     for t in range(21):
         for f in range(9):
-            x_masked = X_scaled.copy()
-            x_masked[t, f] = baseline[f]
-            shap_cell[t, f] = full_pred - _fwd(x_masked[np.newaxis])
-    return shap_cell
+            xm = X_sc.copy(); xm[t, f] = base[f]
+            shap[t, f] = full - _fwd(xm)
+    return shap
 
 
 # ─────────────────────────────────────────────
-# 5. Plot helpers
+# 5. Plot functions
 # ─────────────────────────────────────────────
-BLUE_DARK  = "#1A3A5C"
-BLUE_MED   = "#2E86C1"
-RED_ACCENT = "#C0392B"
-GREEN_ACC  = "#1E8449"
-GRAY_LIGHT = "#ECF0F1"
+BLUE_DARK = "#1A3A5C"
+BLUE_MED  = "#2E86C1"
+RED_ACC   = "#C0392B"
+GREEN_ACC = "#1E8449"
 
-def _apply_spine(ax):
+def _spine(ax):
     for sp in ['top', 'right']:
         ax.spines[sp].set_visible(False)
     ax.spines['left'].set_color('#CCCCCC')
@@ -281,57 +245,53 @@ def _apply_spine(ax):
 def plot_event_level(shap_event, attn_weights):
     fig, axes = plt.subplots(2, 1, figsize=(9, 5.5),
                              gridspec_kw={'hspace': 0.55})
-
-    # — TimeSHAP event —
     ax = axes[0]
-    colors = [RED_ACCENT if v >= 0 else BLUE_MED for v in shap_event]
-    bars = ax.bar(TIME_AXIS, shap_event, width=4, color=colors, alpha=0.88, zorder=3)
-    ax.axhline(0, color='#999999', linewidth=0.8, linestyle='--')
+    colors = [RED_ACC if v >= 0 else BLUE_MED for v in shap_event]
+    ax.bar(TIME_AXIS, shap_event, width=4, color=colors, alpha=0.88, zorder=3)
+    ax.axhline(0, color='#999', linewidth=0.8, linestyle='--')
     ax.set_xlabel("Time post-contact (ms)", fontsize=9)
     ax.set_ylabel("SHAP value", fontsize=9)
-    ax.set_title("Local Event-level TimeSHAP", fontsize=10, fontweight='bold', color=BLUE_DARK)
-    ax.set_xticks(TIME_AXIS[::2])
-    ax.tick_params(labelsize=8)
-    _apply_spine(ax)
+    ax.set_title("Local Event-level TimeSHAP", fontsize=10,
+                 fontweight='bold', color=BLUE_DARK)
+    ax.set_xticks(TIME_AXIS[::2]); ax.tick_params(labelsize=8)
+    _spine(ax)
 
-    # — Attention weights —
     ax2 = axes[1]
-    ax2.fill_between(TIME_AXIS, attn_weights, alpha=0.35, color=BLUE_MED)
+    ax2.fill_between(TIME_AXIS, attn_weights, alpha=0.3, color=BLUE_MED)
     ax2.plot(TIME_AXIS, attn_weights, color=BLUE_DARK, linewidth=1.6)
-    peak_t = TIME_AXIS[np.argmax(attn_weights)]
-    ax2.axvline(peak_t, color=RED_ACCENT, linewidth=1.2, linestyle=':', alpha=0.85)
+    ax2.axvline(TIME_AXIS[np.argmax(attn_weights)], color=RED_ACC,
+                linewidth=1.2, linestyle=':', alpha=0.85)
     ax2.set_xlabel("Time post-contact (ms)", fontsize=9)
     ax2.set_ylabel("Attention weight", fontsize=9)
-    ax2.set_title("Temporal Attention Weights", fontsize=10, fontweight='bold', color=BLUE_DARK)
-    ax2.set_xticks(TIME_AXIS[::2])
-    ax2.tick_params(labelsize=8)
-    _apply_spine(ax2)
-
+    ax2.set_title("Temporal Attention Weights", fontsize=10,
+                  fontweight='bold', color=BLUE_DARK)
+    ax2.set_xticks(TIME_AXIS[::2]); ax2.tick_params(labelsize=8)
+    _spine(ax2)
     fig.patch.set_facecolor('white')
+    plt.tight_layout()
     return fig
 
 
 def plot_feature_level(shap_feat):
-    idx_sorted = np.argsort(np.abs(shap_feat))[::-1]
-    feat_sorted = [FEATURE_COLS[i] for i in idx_sorted]
-    vals_sorted  = shap_feat[idx_sorted]
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = [RED_ACCENT if v >= 0 else BLUE_MED for v in vals_sorted]
-    ax.barh(feat_sorted[::-1], vals_sorted[::-1],
-            color=colors[::-1], alpha=0.88, height=0.6, zorder=3)
-    ax.axvline(0, color='#999999', linewidth=0.8, linestyle='--')
-    ax.set_xlabel("SHAP value (mean over time)", fontsize=9)
-    ax.set_title("Local Feature-level TimeSHAP", fontsize=10, fontweight='bold', color=BLUE_DARK)
+    idx  = np.argsort(np.abs(shap_feat))
+    feat = [FEATURE_COLS[i] for i in idx]
+    vals = shap_feat[idx]
+    fig, ax = plt.subplots(figsize=(8, 4.0))
+    colors = [RED_ACC if v >= 0 else BLUE_MED for v in vals]
+    ax.barh(feat, vals, color=colors, alpha=0.88, height=0.6, zorder=3)
+    ax.axvline(0, color='#999', linewidth=0.8, linestyle='--')
+    ax.set_xlabel("SHAP value (aggregated over time)", fontsize=9)
+    ax.set_title("Local Feature-level TimeSHAP", fontsize=10,
+                 fontweight='bold', color=BLUE_DARK)
     ax.tick_params(labelsize=8.5)
-    _apply_spine(ax)
+    _spine(ax)
     fig.patch.set_facecolor('white')
     plt.tight_layout()
     return fig
 
 
 def plot_cell_level(shap_cell):
-    fig, ax = plt.subplots(figsize=(10, 4.5))
+    fig, ax = plt.subplots(figsize=(10, 4.0))
     vmax = np.abs(shap_cell).max()
     im = ax.imshow(shap_cell.T, aspect='auto', cmap='RdBu_r',
                    vmin=-vmax, vmax=vmax, origin='upper')
@@ -351,7 +311,7 @@ def plot_cell_level(shap_cell):
 
 
 # ─────────────────────────────────────────────
-# 6. Header
+# 6. Page layout
 # ─────────────────────────────────────────────
 st.markdown("<h1 class='sci-title'>ACL Peak Load Prediction — CNN-LSTM-Attention</h1>",
             unsafe_allow_html=True)
@@ -361,83 +321,75 @@ st.markdown("<p class='sci-subtitle'>Time-series biomechanical input · Deep lea
 if not assets_ok:
     st.stop()
 
-# ─────────────────────────────────────────────
-# 7. Layout: left = inputs + result, right = tabs
-# ─────────────────────────────────────────────
-col_left, col_right = st.columns([1, 1.35], gap="large")
+col_left, col_right = st.columns([1, 1.5], gap="large")
 
+# ── LEFT ──────────────────────────────────────
 with col_left:
-    st.markdown("<div class='section-header'>📋 Input Parameters (per frame)</div>",
+    st.markdown("<div class='section-header'>📂 Upload Time-Series CSV</div>",
                 unsafe_allow_html=True)
-    st.caption("Each slider sets a **constant value across all 21 frames** (0–100 ms). "
-               "For full time-series upload, use the CSV uploader below.")
 
-    # — Sliders —
-    c1, c2 = st.columns(2)
-    with c1:
-        hfa = st.number_input("Hip Flexion — HFA (°)",    value=21.20, step=0.1, format="%.2f")
-        hra = st.number_input("Hip Rotation — HRA (°)",   value=5.00,  step=0.1, format="%.2f")
-        haa = st.number_input("Hip Adduction — HAA (°)",  value=21.32, step=0.1, format="%.2f")
-        kfa = st.number_input("Knee Flexion — KFA (°)",   value=30.10, step=0.1, format="%.2f")
-        itr = st.number_input("Tibial Rotation — ITR (°)",value=6.00,  step=0.1, format="%.2f")
-    with c2:
-        kva = st.number_input("Knee Valgus — KVA (°)",    value=0.22,  step=0.01, format="%.2f")
-        adf = st.number_input("Ankle Dorsifl. — ADF (°)", value=20.00, step=0.1, format="%.2f")
-        fpa = st.number_input("Foot Prog. — FPA (°)",     value=12.00, step=0.1, format="%.2f")
-        tfa = st.number_input("Trunk Flexion — TFA (°)",  value=24.00, step=0.1, format="%.2f")
+    st.markdown(f"""
+    <div class='upload-box'>
+    <b>Format:</b> 21 rows × 9 columns<br>
+    <b>Required columns:</b><br>
+    <code style='font-size:0.82rem'>{', '.join(FEATURE_COLS)}</code>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Build [21, 9] sequence from constant values
-    row_vals = [hfa, hra, haa, kfa, itr, kva, adf, fpa, tfa]
-    X_seq = np.tile(row_vals, (21, 1)).astype(np.float32)
+    uploaded = st.file_uploader("", type=["csv"], label_visibility="collapsed")
 
-    # — Optional CSV upload —
-    with st.expander("📂 Upload time-series CSV (21 rows × 9 features)"):
-        uploaded = st.file_uploader("CSV must have columns: " + ", ".join(FEATURE_COLS),
-                                    type=["csv"])
-        if uploaded:
-            try:
-                df_up = pd.read_csv(uploaded)[FEATURE_COLS].values
-                if df_up.shape == (21, 9):
-                    X_seq = df_up.astype(np.float32)
-                    st.success("✅ CSV loaded — using uploaded time-series.")
-                else:
-                    st.error(f"Shape mismatch: expected (21, 9), got {df_up.shape}")
-            except Exception as e:
-                st.error(f"CSV error: {e}")
+    X_seq = None
+    if uploaded:
+        try:
+            df_up   = pd.read_csv(uploaded)
+            missing = [c for c in FEATURE_COLS if c not in df_up.columns]
+            if missing:
+                st.error(f"Missing columns: {missing}")
+            elif df_up.shape[0] != 21:
+                st.error(f"Expected 21 rows, got {df_up.shape[0]}")
+            else:
+                X_seq = df_up[FEATURE_COLS].values.astype(np.float32)
+                st.success(f"✅ Loaded — shape {X_seq.shape}")
+                st.dataframe(df_up[FEATURE_COLS].round(3), height=200)
+        except Exception as e:
+            st.error(f"CSV error: {e}")
 
-    # — Predict —
-    run_btn = st.button("▶  Run Prediction", use_container_width=True, type="primary")
+    run_btn = st.button("▶  Run Prediction + TimeSHAP",
+                        use_container_width=True,
+                        type="primary",
+                        disabled=(X_seq is None))
 
-    # Store in session state
-    if run_btn:
-        with st.spinner("Computing prediction + TimeSHAP (cell-level may take ~10s)…"):
-            pred_val, attn_np   = predict_single(X_seq)
-            shap_event          = compute_timeshap_event(X_seq)
-            shap_feat           = compute_timeshap_feature(X_seq)
-            shap_cell           = compute_timeshap_cell(X_seq)
-        st.session_state["pred_val"]   = pred_val
-        st.session_state["attn_np"]    = attn_np
-        st.session_state["shap_event"] = shap_event
-        st.session_state["shap_feat"]  = shap_feat
-        st.session_state["shap_cell"]  = shap_cell
-        st.session_state["X_seq"]      = X_seq
+    if run_btn and X_seq is not None:
+        with st.spinner("Computing prediction + all TimeSHAP levels (~10 s)…"):
+            pred_val, attn_np = predict_single(X_seq)
+            shap_event        = compute_timeshap_event(X_seq)
+            shap_feat         = compute_timeshap_feature(X_seq)
+            shap_cell         = compute_timeshap_cell(X_seq)
+        st.session_state.update({
+            "pred_val":   pred_val,
+            "attn_np":    attn_np,
+            "shap_event": shap_event,
+            "shap_feat":  shap_feat,
+            "shap_cell":  shap_cell,
+            "X_seq":      X_seq,
+        })
 
-    # — Result card —
+    # Result card
     if "pred_val" in st.session_state:
-        pred_val = st.session_state["pred_val"]
-        is_high  = pred_val >= ACL_THRESHOLD
-        s_color  = RED_ACCENT if is_high else GREEN_ACC
-        s_label  = "HIGH LOAD" if is_high else "LOW LOAD"
+        pv      = st.session_state["pred_val"]
+        is_high = pv >= ACL_THRESHOLD
+        s_color = RED_ACC if is_high else GREEN_ACC
+        s_label = "HIGH LOAD" if is_high else "LOW LOAD"
+
         st.markdown(f"""
         <div class="result-card">
             <div class="label-text">Predicted Peak ACL Load</div>
             <div class="result-row">
-                <span class="value-text">{pred_val:.4f}</span>
+                <span class="value-text">{pv:.4f}</span>
                 <span class="status-text" style="color:{s_color};">{s_label}</span>
             </div>
             <div class="meta-text">
-                Threshold: {ACL_THRESHOLD:.4f} &nbsp;|&nbsp;
-                Rule: ≥ threshold → High Load<br>
+                Threshold: {ACL_THRESHOLD:.4f} &nbsp;|&nbsp; ≥ threshold → High Load<br>
                 Model: CNN-LSTM-Attention &nbsp;|&nbsp; Window: 0–100 ms post-contact
             </div>
         </div>
@@ -448,84 +400,74 @@ with col_left:
                        "Input: 21 frames × 9 joint features  |  "
                        "Output: peak ACL load (inverse-transformed)")
 
-        # Export
-        df_export = pd.DataFrame([row_vals], columns=FEATURE_COLS)
-        df_export["pred_ACL_peak"] = pred_val
-        df_export["risk"]          = s_label
+        df_exp = pd.DataFrame(st.session_state["X_seq"], columns=FEATURE_COLS)
+        df_exp.insert(0, "frame_ms", TIME_AXIS)
+        df_exp["pred_ACL_peak"] = pv
+        df_exp["risk"]          = s_label
         st.download_button("📥 Export Report CSV",
-                           data=df_export.to_csv(index=False).encode(),
+                           data=df_exp.to_csv(index=False).encode(),
                            file_name="acl_cnn_report.csv",
                            use_container_width=True)
 
 
-# ─────────────────────────────────────────────
-# 8. Right panel — TimeSHAP tabs
-# ─────────────────────────────────────────────
+# ── RIGHT: all 3 SHAP plots stacked ───────────
 with col_right:
     st.markdown("<div class='section-header'>🔍 TimeSHAP Interpretability</div>",
                 unsafe_allow_html=True)
 
     if "shap_event" not in st.session_state:
-        st.markdown("""
-        <div class="timeshap-note">
-        ▶ Click <b>Run Prediction</b> to generate TimeSHAP explanations.<br>
-        Three levels of interpretability will appear here:<br>
-        &nbsp;&nbsp;• <b>Event-level</b>: which time frames matter most<br>
-        &nbsp;&nbsp;• <b>Feature-level</b>: which joint angles contribute most<br>
-        &nbsp;&nbsp;• <b>Cell-level</b>: joint feature × time interaction heatmap
-        </div>
-        """, unsafe_allow_html=True)
+        st.info("Upload a CSV and click **Run Prediction + TimeSHAP** to see all three "
+                "levels of TimeSHAP explanations here.")
     else:
-        tab1, tab2, tab3 = st.tabs([
-            "📈 Event-level",
-            "📊 Feature-level",
-            "🗺️ Cell-level"
-        ])
+        # ① Event-level
+        st.markdown("<div class='shap-label'>① Event-level TimeSHAP</div>",
+                    unsafe_allow_html=True)
+        st.markdown("""<div class='shap-desc'>
+            SHAP value for each of the 21 time frames (0–100 ms post-contact).
+            <b>Red</b> bars increase predicted ACL load; <b>blue</b> bars decrease it.
+            The lower panel shows where the model's attention focused.
+        </div>""", unsafe_allow_html=True)
+        st.pyplot(plot_event_level(st.session_state["shap_event"],
+                                   st.session_state["attn_np"]),
+                  clear_figure=True)
+        st.caption("Fig 1. Local event-level TimeSHAP + temporal attention weights.")
 
-        with tab1:
-            st.markdown("""
-            <div class="timeshap-note">
-            <b>Event-level TimeSHAP</b>: SHAP value for each of the 21 time frames
-            (0–100 ms post-contact). Positive bars (red) = frames that <i>increase</i>
-            the predicted ACL load; negative (blue) = frames that <i>decrease</i> it.
-            The attention curve below shows where the model focused.
-            </div>
-            """, unsafe_allow_html=True)
-            fig1 = plot_event_level(st.session_state["shap_event"],
-                                    st.session_state["attn_np"])
-            st.pyplot(fig1, clear_figure=True)
-            st.caption("Fig 1. Local event-level TimeSHAP + temporal attention weights.")
+        st.markdown("<hr style='border:none;border-top:1px solid #E5EAF0;margin:10px 0 4px;'>",
+                    unsafe_allow_html=True)
 
-        with tab2:
-            st.markdown("""
-            <div class="timeshap-note">
-            <b>Feature-level TimeSHAP</b>: Each feature's contribution is computed
-            by masking that feature across <i>all</i> time frames and measuring the
-            drop in predicted ACL load. Features are sorted by absolute impact.
-            </div>
-            """, unsafe_allow_html=True)
-            fig2 = plot_feature_level(st.session_state["shap_feat"])
-            st.pyplot(fig2, clear_figure=True)
-            st.caption("Fig 2. Local feature-level TimeSHAP — feature importance aggregated over time.")
+        # ② Feature-level
+        st.markdown("<div class='shap-label'>② Feature-level TimeSHAP</div>",
+                    unsafe_allow_html=True)
+        st.markdown("""<div class='shap-desc'>
+            Each feature's contribution computed by masking it across <i>all</i> time frames.
+            Sorted by absolute impact magnitude.
+        </div>""", unsafe_allow_html=True)
+        st.pyplot(plot_feature_level(st.session_state["shap_feat"]),
+                  clear_figure=True)
+        st.caption("Fig 2. Local feature-level TimeSHAP — importance aggregated over time.")
 
-        with tab3:
-            st.markdown("""
-            <div class="timeshap-note">
-            <b>Cell-level TimeSHAP</b>: The full Feature × Time interaction heatmap.
-            Each cell shows the SHAP value when that specific (feature, frame) pair
-            is masked. Red = contribution toward High Load; Blue = toward Low Load.
-            </div>
-            """, unsafe_allow_html=True)
-            fig3 = plot_cell_level(st.session_state["shap_cell"])
-            st.pyplot(fig3, clear_figure=True)
-            st.caption("Fig 3. Local cell-level TimeSHAP heatmap (Feature × Time).")
+        st.markdown("<hr style='border:none;border-top:1px solid #E5EAF0;margin:10px 0 4px;'>",
+                    unsafe_allow_html=True)
+
+        # ③ Cell-level
+        st.markdown("<div class='shap-label'>③ Cell-level TimeSHAP</div>",
+                    unsafe_allow_html=True)
+        st.markdown("""<div class='shap-desc'>
+            Full Feature × Time interaction heatmap. Each cell = SHAP value when that
+            (feature, frame) pair is masked.
+            <b>Red</b> → toward High Load; <b>Blue</b> → toward Low Load.
+        </div>""", unsafe_allow_html=True)
+        st.pyplot(plot_cell_level(st.session_state["shap_cell"]),
+                  clear_figure=True)
+        st.caption("Fig 3. Local cell-level TimeSHAP heatmap (Feature × Time).")
+
 
 # ─────────────────────────────────────────────
-# 9. Footer
+# 7. Footer
 # ─────────────────────────────────────────────
 st.markdown("""
 <br><hr>
-<div style='color:#95A5A6; font-size:0.78rem; font-family: Times New Roman;'>
+<div style='color:#95A5A6;font-size:0.78rem;font-family:Times New Roman;'>
 CNN-LSTM-Attention ACL Load Predictor &nbsp;|&nbsp;
 TimeSHAP: Bento et al. (2021) NeurIPS &nbsp;|&nbsp;
 Reference: Zhang et al. (2026). DOI: 10.1016/j.jsams.2026.04.01
