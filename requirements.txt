@@ -5,6 +5,7 @@ pandas
 matplotlib
 scikit-learn
 shap
+timeshap
 imbalanced-learn
 torch
 altair
