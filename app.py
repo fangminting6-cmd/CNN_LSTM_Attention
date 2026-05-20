@@ -658,8 +658,8 @@ def plot_local_cell_level_final(cell_data: pd.DataFrame,
 # ─────────────────────────────────────────────
 # 6. Page layout
 # ─────────────────────────────────────────────
-st.markdown("<h1 class='sci-title'>ACL Peak Load Prediction — CNN-LSTM-Attention</h1>", unsafe_allow_html=True)
-st.markdown("<p class='sci-subtitle'>Time-series biomechanical input · Deep learning regression · Official-style local TimeSHAP interpretability</p>", unsafe_allow_html=True)
+st.markdown("<h1 class='sci-title'>ACL Peak Force Prediction — CNN-LSTM-Attention</h1>", unsafe_allow_html=True)
+st.markdown("<p class='sci-subtitle'>Time-series biomechanical input · Deep learning regression · local TimeSHAP interpretability</p>", unsafe_allow_html=True)
 
 if not assets_ok:
     st.stop()
@@ -696,7 +696,7 @@ with col_left:
         except Exception as e:
             st.error(f"CSV error: {e}")
 
-    run_btn = st.button("▶  Run Prediction + Official TimeSHAP", use_container_width=True,
+    run_btn = st.button("▶  Run Prediction + TimeSHAP", use_container_width=True,
                         type="primary", disabled=(X_seq is None))
 
     if run_btn and X_seq is not None:
