@@ -162,7 +162,7 @@ def load_assets():
     m.eval()
     return m, scaler_X, scaler_y, threshold, cfg
 
-DEFAULT_CSV_PATH = "Data.csv"  # 默认演示数据集路径，需与 app.py 放在同一目录
+DEFAULT_CSV_PATH = "Data.csv"  # Default sample dataset path; must be placed in the same directory as app.py
 
 try:
     model, scaler_X, scaler_y, ACL_THRESHOLD, cfg = load_assets()
@@ -681,18 +681,18 @@ with col_left:
     """, unsafe_allow_html=True)
 
     data_source = st.radio(
-        "数据来源",
-        options=["使用默认示例数据", "上传我的CSV"],
+        "Data source",
+        options=["Use Default Sample Data", "Upload My CSV"],
         horizontal=True,
         label_visibility="collapsed",
     )
 
     uploaded = None
-    if data_source == "上传我的CSV":
+    if data_source == "Upload My CSV":
         uploaded = st.file_uploader("", type=["csv"], label_visibility="collapsed")
 
     def _load_and_validate(df_up):
-        """校验列名与行数，返回 (X_seq, error_msg)"""
+        """Validate column names and row count, return (X_seq, error_msg)"""
         missing = [c for c in FEATURE_COLS if c not in df_up.columns]
         if missing:
             return None, f"Missing columns: {missing}"
@@ -701,19 +701,19 @@ with col_left:
         return df_up[FEATURE_COLS].values.astype(np.float32), None
 
     X_seq = None
-    if data_source == "使用默认示例数据":
+    if data_source == "Use Default Sample Data":
         if os.path.exists(DEFAULT_CSV_PATH):
             try:
                 df_default = pd.read_csv(DEFAULT_CSV_PATH)
                 X_seq, err = _load_and_validate(df_default)
                 if err:
-                    st.error(f"默认数据集有误: {err}")
+                    st.error(f"Default dataset error: {err}")
                 else:
-                    st.success(f"✅ 已加载默认示例数据 — shape {X_seq.shape}")
+                    st.success(f"✅ Default sample data loaded — shape {X_seq.shape}")
             except Exception as e:
-                st.error(f"读取默认CSV出错: {e}")
+                st.error(f"Error reading default CSV: {e}")
         else:
-            st.warning(f"未找到默认数据集文件 `{DEFAULT_CSV_PATH}`，请将其放在 app.py 同级目录下，或切换为上传CSV。")
+            st.warning(f"Default dataset file `{DEFAULT_CSV_PATH}` not found. Please place it in the same directory as app.py, or switch to Upload My CSV.")
     elif uploaded:
         try:
             df_up = pd.read_csv(uploaded)
@@ -722,7 +722,7 @@ with col_left:
                 st.error(err)
             else:
                 st.success(f"✅ Loaded — shape {X_seq.shape}")
-                # 数据预览表格已删除
+                # Data preview table removed
         except Exception as e:
             st.error(f"CSV error: {e}")
 
