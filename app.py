@@ -682,7 +682,7 @@ with col_left:
 
     data_source = st.radio(
         "数据来源",
-        options=["使用默认示例数据", "上传我的CSV"],
+        options=["Use default sample data", "Upload my CSV"],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -709,7 +709,7 @@ with col_left:
                 if err:
                     st.error(f"默认数据集有误: {err}")
                 else:
-                    st.success(f"✅ 已加载默认示例数据 — shape {X_seq.shape}")
+                    st.success(f"✅ Default sample data loaded — shape {X_seq.shape}")
             except Exception as e:
                 st.error(f"读取默认CSV出错: {e}")
         else:
